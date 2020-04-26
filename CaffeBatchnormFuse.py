@@ -55,6 +55,39 @@ class CaffeBatchnormFuse:
 
         return None
 
+    #
+    # Re-name the top blob name if the bottom blob has the same name
+    #
+    # For the in-place layers, the bottom blob may has the same name as the top blob.
+    #
+    # We need to do the quantization for each layer based on the blob, the same bottom and
+    # top blob name will introduce the issue while get the blob data of each layer.
+    #
+    # So, we need to re-name the top to the layer's name to avoid this issue.
+    #
+    def update_same_top_bottom_name_layer(self, proto):
+        # get layer list which has the same top and bottom blob name
+        layer_has_same_top_bottom_name_list = []
+        for i in range(len(proto.layer)):
+            layer = proto.layer[i]
+            if str(layer.type).lower() in ['data','input','eltwise']:
+                continue
+            if layer.top[0] == layer.bottom[0]:
+                layer_has_same_top_bottom_name_list.append((i,layer))
+
+        #print("#bottom same as top blob layers: {}#".format(len(layer_has_same_top_bottom_name_list)))
+        # Update all layers has the same top and bottom blob
+        for item in reversed(layer_has_same_top_bottom_name_list):
+            (idx,layer) = item
+            #print("#[{}] [{}] [{}] [{}]".format(idx, layer.type, layer.name, layer.top[0]))
+            # update all the consumer layers
+            for l in proto.layer[idx + 1:]:
+                for j in range(len(l.bottom)):
+                    if l.bottom[j] == layer.top[0]:
+                        #print('layer:{} update bottom blob name {} to {}'.format(l.name, l.bottom[j], layer.name))
+                        l.bottom[j] = layer.name
+            layer.top[0] = layer.name
+
     # get the conv layer name of the conv-batchnorm-scale group
     def get_fuse_conv_layer(self, proto, layer):
         if layer.type == u'Scale':
@@ -155,6 +188,8 @@ class CaffeBatchnormFuse:
         # remove the BN and Scale in the Conv-BN-Scale group
         for l in remove_layer_list:
             proto.layer.remove(l)
+
+        self.update_same_top_bottom_name_layer(proto)
 
         updated_proto = self.network.replace('.prototxt', '_m.prototxt')
         updated_model = self.model.replace('.caffemodel', '_m.caffemodel')

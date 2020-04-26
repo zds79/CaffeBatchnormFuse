@@ -53,3 +53,7 @@ python CaffeBatchnormFuse.py
 --model <path to original input caffe .caffemodel file> 
 --test <1 to inference with the fused model and original model>
 ```
+
+# Reference:
+https://github.com/zhang-xin/CNN-Conv-BatchNorm-fusion
+https://github.com/hmph/caffe-fold-batchnorm
