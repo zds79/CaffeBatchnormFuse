@@ -70,7 +70,7 @@ class CaffeBatchnormFuse:
         layer_has_same_top_bottom_name_list = []
         for i in range(len(proto.layer)):
             layer = proto.layer[i]
-            if str(layer.type).lower() in ['data','input','eltwise']:
+            if str(layer.type).lower() in ['data','input','eltwise', 'dropout']:
                 continue
             if layer.top[0] == layer.bottom[0]:
                 layer_has_same_top_bottom_name_list.append((i,layer))
