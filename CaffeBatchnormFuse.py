@@ -104,7 +104,7 @@ class CaffeBatchnormFuse:
 
     # get layer index with layer name
     def get_layer_index(self, proto, name):
-        for i in xrange(len(proto.layer)):
+        for i in range(len(proto.layer)):
             if proto.layer[i].name == name:
                 return i
         return -1
@@ -157,11 +157,11 @@ class CaffeBatchnormFuse:
                             conv_layer.name += '_m'
                             for l in proto.layer[conv_layer_index:]:
                                 #print("  #check layer {} {} tops: {} bottoms:{}".format(l.name, l.type, l.top, l.bottom))
-                                for j in xrange(len(l.top)):
+                                for j in range(len(l.top)):
                                     if l.top[j] == orig_top_name:
                                         #print('    layer:{} update top blob name: {}->{}'.format(l.name, l.top[j], updated_top_name))
                                         l.top[j] = updated_top_name
-                                for k in xrange(len(l.bottom)):
+                                for k in range(len(l.bottom)):
                                     if l.bottom[k] == orig_top_name:
                                         #print('    layer:{} update bottom blob name: {}->{}'.format(l.name, l.bottom[j], updated_top_name))
                                         l.bottom[k] = updated_top_name
