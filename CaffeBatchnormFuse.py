@@ -1,8 +1,12 @@
 #!/usr/bin/python
 #
 # Brief:
-#   Fuse the Conv-BatchNorm-Scale layer group and Batchnorm-Scale layer group in caffe model
+#   Do the preprocess for converting of the caffe model to Nano.AI model.
+#
+#   1. Fuse the Conv-BatchNorm-Scale layer group and Batchnorm-Scale layer group in caffe model
 #   to speed up the inference
+#   2. Remove the dropout layer
+#   3. Update the in-place layer to make sure the bottom and top blob has different name
 #
 # Reference:
 #   https://github.com/zhang-xin/CNN-Conv-BatchNorm-fusion
@@ -31,6 +35,8 @@ class CaffeBatchnormFuse:
         caffe.set_mode_cpu()
         self.orig_net = caffe.Net(network, model, caffe.TEST)
         self.net = self.orig_net
+        self.updated_proto = self.network.replace('.prototxt', '_m.prototxt')
+        self.updated_model = self.model.replace('.caffemodel', '_m.caffemodel')
 
     # Get the producer layer of the specified blob
     # search from the bottom layer to the top layer (reverse)
@@ -54,6 +60,34 @@ class CaffeBatchnormFuse:
                         return proto.layer[i]
 
         return None
+
+    #
+    # Get the consumer layers of the specified blob
+    # search from the top layer to the bottom layer (reverse)
+    #
+    def get_blob_consumer_layer(self, proto, blob_name, layer_name):
+        consumer_layers = []
+        start_check = 0
+        layer_len = len(proto.layer)
+        i = 0
+        while i < layer_len:
+            if proto.layer[i].name == layer_name:
+                start_check = 1
+                i += 1
+                continue
+
+            if start_check == 1:
+                bottom_blobs = len(proto.layer[i].bottom)
+                while bottom_blobs > 0:
+                    bottom_blobs -= 1
+                    if proto.layer[i].bottom[bottom_blobs] == blob_name:
+                        consumer_layers.append((i,proto.layer[i]))
+                        #print("  #consumer layer: [{}] [{}] [{}]".format(i, proto.layer[i].type, proto.layer[i].name))
+                        break
+
+            i += 1
+
+        return consumer_layers
 
     #
     # Re-name the top blob name if the bottom blob has the same name
@@ -191,11 +225,11 @@ class CaffeBatchnormFuse:
 
         self.update_same_top_bottom_name_layer(proto)
 
-        updated_proto = self.network.replace('.prototxt', '_m.prototxt')
-        updated_model = self.model.replace('.caffemodel', '_m.caffemodel')
+        # updated_proto = self.network.replace('.prototxt', '_m.prototxt')
+        # updated_model = self.model.replace('.caffemodel', '_m.caffemodel')
 
         # save the updated network topology .proto
-        with open(updated_proto, 'w') as f:
+        with open(self.updated_proto, 'w') as f:
             f.write(str(proto))
 
         # calc new conv weights from original conv/bn/sc weights
@@ -251,7 +285,7 @@ class CaffeBatchnormFuse:
         # Note: as we changed the proto topology, we need to reload the model with the updated proto to
         #        reflect the update in the model also (The unused param's in the .model will be automaticly
         #        removed.
-        self.net = caffe.Net(updated_proto, self.model, caffe.TEST)
+        self.net = caffe.Net(self.updated_proto, self.model, caffe.TEST)
 
         # update the conv's weights and bias for the conv-batchnorm-scale group
         for layer in conv_new_w:
@@ -263,8 +297,60 @@ class CaffeBatchnormFuse:
             self.net.params[layer + '_f'][0].data[...] = scale_new_w[layer]
             self.net.params[layer + '_f'][1].data[...] = scale_new_b[layer]
 
-        self.net.save(updated_model)
-        self.net = caffe.Net(updated_proto, updated_model, caffe.TEST)
+        self.net.save(self.updated_model)
+        self.net = caffe.Net(self.updated_proto, self.updated_model, caffe.TEST)
+    #
+    # Remove the invalid layers
+    #
+    def remove_invalid_layer(self):
+        proto = caffe_pb2.NetParameter()
+        text_format.Merge(open(self.updated_proto).read(), proto)
+        invalid_layer_list = []
+        for i in range(len(proto.layer)):
+            layer = proto.layer[i]
+            if str(layer.type).lower() in ['pooling']:
+                pooling_param = layer.pooling_param
+                if pooling_param.round_mode == 1:
+                    # floor
+                    print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+                    print("! Please manually change the layer({})'s 'round_mode: FLOOR' to 'ceil_mode: false' from the prototxt !".format(layer.name))
+                    print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+                #else:
+                    #print("Notice: please manually remove the {}'s round_mode: CEIL if it is declared in the prototxt".format(layer.name))
+            if str(layer.type).lower() in ['dropout']:
+                invalid_layer_list.append((i,layer))
+        for item in invalid_layer_list:
+            (idx,layer) = item
+            #print("#invalid layer: [{}] [{}] [{}] [{}]".format(idx, layer.type, layer.name, layer.top[0]))
+            top_blobs = len(proto.layer[idx].top)
+            while top_blobs > 0:
+                top_blobs -= 1
+                top_blob_name = proto.layer[idx].top[top_blobs]
+                consumer_layer_list = self.get_blob_consumer_layer(proto, top_blob_name, layer.name)
+                new_bottom_name = proto.layer[idx].bottom[0]
+
+                for item in consumer_layer_list:
+                    (consumer_idx, consumer_layer) = item
+                    #print("  #consumer layer: [{}] [{}] [{}] [{}]".format(consumer_idx, consumer_layer.type, consumer_layer.name, len(consumer_layer.bottom)))
+                    consumer_bottom_blobs = len(consumer_layer.bottom)
+                    while consumer_bottom_blobs > 0:
+                        consumer_bottom_blobs -= 1
+                        if consumer_layer.bottom[consumer_bottom_blobs] == top_blob_name:
+                            #print("    #update consumer layer bottom [{}] from [{}] to [{}]".format(consumer_bottom_blobs, proto.layer[consumer_idx].bottom[consumer_bottom_blobs], new_bottom_name))
+                            proto.layer[consumer_idx].bottom[consumer_bottom_blobs] = new_bottom_name
+
+        # remove the BN and Scale in the Conv-BN-Scale group
+        for item in invalid_layer_list:
+            (idx,layer) = item
+            proto.layer.remove(layer)
+
+        # save the updated network topology .proto
+        with open(self.updated_proto, 'w') as f:
+            f.write(str(proto))
+
+        self.net.save(self.updated_model)
+        self.net = caffe.Net(self.updated_proto, self.updated_model, caffe.TEST)
+        self.net.save(self.updated_model)
 
     def test(self):
         np.random.seed()
@@ -297,6 +383,7 @@ if __name__ == "__main__":
 
     iCaffeBatchnormFuse = CaffeBatchnormFuse(args.proto, args.model)
     iCaffeBatchnormFuse.fuse()
+    iCaffeBatchnormFuse.remove_invalid_layer()
 
     if args.test:
         iCaffeBatchnormFuse.test()
